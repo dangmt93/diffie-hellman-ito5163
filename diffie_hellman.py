@@ -1,3 +1,12 @@
+"""
+Description: 
+Author: Thomas Dang
+Date: 19-May-2025
+
+Notes:
+    - 
+"""
+
 import secrets
 
 def generate_dh_private(p) -> int:

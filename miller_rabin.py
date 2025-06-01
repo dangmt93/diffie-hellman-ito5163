@@ -1,3 +1,12 @@
+"""
+Description: 
+Author: Thomas Dang
+Date: 19-May-2025
+
+Notes:
+    - 
+"""
+
 import random
 
 def miller_rabin_is_probable_prime(n, n_rounds=20) -> bool:
@@ -23,6 +32,17 @@ def miller_rabin_is_probable_prime(n, n_rounds=20) -> bool:
     if n % 2 == 0: 
         return False
 
+    '''
+    Miller-Rabin test is based on 2 properties of prime numbers:
+        1. If n is prime, then for any integer a such that 1 < a < n-1, it holds that a^(n-1) ≡ 1 (mod n).
+        2. If n is prime, then for any integer a such that 1 < a < n-1, it holds that a^((n-1)/d) ≢ 1 (mod n) for all prime factors d of n-1.
+    
+    The Miller-Rabin test is a probabilistic test that uses these properties to determine if n is likely prime.
+    The test is based on the fact that if n is prime, then for any integer a such that 1 < a < n-1, it holds that:
+    a^(n-1) ≡ 1 (mod n).
+    If n is not prime, then for any integer a such that 1 < a < n-1, it holds that:
+    a^((n-1)/d) ≢ 1 (mod n) for all prime factors d of n-1.
+    '''
 
     # Write n-1 as 2^k * q with q odd (by factoring out all 2s from n-1)
     k: int = 0
@@ -30,7 +50,7 @@ def miller_rabin_is_probable_prime(n, n_rounds=20) -> bool:
     while q % 2 == 0:
         q //= 2 # Divide q by 2 until it is odd
         k += 1 # Keep track of the number of divisions
-    # Now n-1 = 2^k * q, where q is odd
+    # Now n-1 = 2^k * q, where q is odd and k > 0
     # print(f"With n = {n}, n-1 = 2^{k} * {q}") #!--- For testing
 
     # Run n_rounds rounds of testing
@@ -40,15 +60,16 @@ def miller_rabin_is_probable_prime(n, n_rounds=20) -> bool:
         # Compute x = a^q mod n
         x: int = pow(a, q, n)
         
-        # If a^(n-1) mod n = 1, return "inconclusive" (this round passes)
-        if x == 1:
+        # If a^(n-1) mod n = 1 or = n-1, return "inconclusive" (this round passes)
+        #? According to https://www.geeksforgeeks.org/primality-test-set-3-miller-rabin/, it also checks if x == n-1
+        if x == 1 or x == n-1:
             continue # This round passes (inconclusive), continue to next round
         
-        # Loop for k-1 iterations to check if a^(2^i * q) mod n is n-1 for some i in [0, k-1]
-        # If we find such an i, we can conclude that n is probably prime
-        for __ in range(k - 1):
-            y: int = pow(x, 2, n)
-            if y == n - 1:
+        # Loop for k-1 iterations to check if for any j in [0, k-1], a^(2^j * q) mod n = n-1
+        # If we find such j, n is probably prime
+        for _ in range(k-1):
+            x: int = pow(x, 2, n) # Keep squaring x (i.e., compute a^(2^(j+1) * q) mod n instead of recomputing a^(2^j * q) mod n)
+            if x == n - 1:
                 break # This round passes (inconclusive), continue to next round
         
         else:
