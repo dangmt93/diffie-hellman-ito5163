@@ -13,13 +13,16 @@ def miller_rabin_is_probable_prime(n, n_rounds=20) -> bool:
     """
     Perform the Miller-Rabin primality test on n to determine if it is a (probable) prime.
     
-    NOTE: Miller-Rabin test is probabilistic, 
-    meaning it can return false positives (composite numbers that pass the test).
-    The higher the number of rounds, the lower the probability of a false positive.
-    
+    NOTE: Miller-Rabin test is probabilistic. The algorithm applies multiple rounds to the candidate number n. 
+    In each round, a random base `a` (1 < a < n-1) is selected, and n is tested for compositeness. 
+    If n passes a round, it is a "probable prime". 
+    However, in each round, there is a 1/4 chance of false positive (i.e., a composite number passing the test).
+    Thus, the higher the number of rounds, the lower the probability of a false positive (i.e., higher confidence degree that the number is prime). 
+    False positive rate = 1/4^rounds.
+
     Args:
         n (int): The number to be tested for primality.
-        n_rounds (int, optional): Number of test rounds (higher = lower error rate but longer). Default is 20.
+        n_rounds (int, optional): Number of test rounds (higher = lower false positive rate but longer runtime). Default is 20.
 
     Returns:
         bool: True if the number is a probable prime, False otherwise (possibly composite).
@@ -32,51 +35,40 @@ def miller_rabin_is_probable_prime(n, n_rounds=20) -> bool:
     if n % 2 == 0: 
         return False
 
-    '''
-    Miller-Rabin test is based on 2 properties of prime numbers:
-        1. If n is prime, then for any integer a such that 1 < a < n-1, it holds that a^(n-1) ≡ 1 (mod n).
-        2. If n is prime, then for any integer a such that 1 < a < n-1, it holds that a^((n-1)/d) ≢ 1 (mod n) for all prime factors d of n-1.
-    
-    The Miller-Rabin test is a probabilistic test that uses these properties to determine if n is likely prime.
-    The test is based on the fact that if n is prime, then for any integer a such that 1 < a < n-1, it holds that:
-    a^(n-1) ≡ 1 (mod n).
-    If n is not prime, then for any integer a such that 1 < a < n-1, it holds that:
-    a^((n-1)/d) ≢ 1 (mod n) for all prime factors d of n-1.
-    '''
-
     # Write n-1 as 2^k * q with q odd (by factoring out all 2s from n-1)
     k: int = 0
     q: int = n - 1
     while q % 2 == 0:
         q //= 2 # Divide q by 2 until it is odd
-        k += 1 # Keep track of the number of divisions
-    # Now n-1 = 2^k * q, where q is odd and k > 0
+        k += 1  # Keep track of the number of divisions
+    # Now, we have n-1 = 2^k * q, where q is odd and k > 0
     # print(f"With n = {n}, n-1 = 2^{k} * {q}") #!--- For testing
 
-    # Run n_rounds rounds of testing
+    # Run n_rounds rounds of testing (false positive rate = 1/4^n_rounds)
     for _ in range(n_rounds):
-        # Select a random integer a in the range [2, n-2] (1 < a < n-1)
+        # Select a random base `a` in the range [2, n-2] (1 < a < n-1)
         a: int = random.randint(2, n - 2)
         # Compute x = a^q mod n
         x: int = pow(a, q, n)
         
-        # If a^(n-1) mod n = 1 or = n-1, return "inconclusive" (this round passes)
+        # 1st condition: if a^(n-1) mod n = 1 or n-1, this round passes
         #? According to https://www.geeksforgeeks.org/primality-test-set-3-miller-rabin/, it also checks if x == n-1
         if x == 1 or x == n-1:
-            continue # This round passes (inconclusive), continue to next round
+            continue # This round passes (i.e., n is probably prime), continue to next round
         
-        # Loop for k-1 iterations to check if for any j in [0, k-1], a^(2^j * q) mod n = n-1
-        # If we find such j, n is probably prime
+        # 2nd condition: if 1st condition is not met, check if x can be squared k times to reach n-1
+        # Loop for j in [0, k-1] (k times), check if (a^q)^(2^j) mod n = x^(2^j) mod n = n-1. If we find such j, n is probably prime
         for _ in range(k-1):
-            x: int = pow(x, 2, n) # Keep squaring x (i.e., compute a^(2^(j+1) * q) mod n instead of recomputing a^(2^j * q) mod n)
+            x: int = pow(x, 2, n) # Keep squaring x (~ x^(2^j) mod n)
             if x == n - 1:
-                break # This round passes (inconclusive), continue to next round
+                break # This round passes (i.e., n is probably prime), break out of this loop and continue to next round
         
+        # If the loop did not break, i.e., we did not find any j such that x^(2^j) mod n = n-1
+        # return n is composite (i.e., guaranteed not prime)
         else:
-            # None of the conditions were met, n is composite
             return False
         
-    # If passed all rounds, n is probably prime
+    # If passed all rounds, n has high probability of being prime (more rounds = lower false positive rate)
     return True
 
 def get_random_odd_number(bits) -> int:
@@ -90,7 +82,6 @@ def get_random_odd_number(bits) -> int:
 
     Returns:
         int: Random odd integer of the specified bit length.
-            
     """
     n: int = random.getrandbits(bits)
     n |= (1 << (bits - 1)) | 1 # Ensure top and bottom bits set: full length, odd
