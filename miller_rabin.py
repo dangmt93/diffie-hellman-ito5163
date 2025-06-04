@@ -6,8 +6,9 @@ Date: 19-May-2025
 Notes:
     - 
 """
-
 import random
+import secrets
+import time
 
 def miller_rabin_is_probable_prime(n, n_rounds=20) -> bool:
     """
@@ -44,28 +45,43 @@ def miller_rabin_is_probable_prime(n, n_rounds=20) -> bool:
     # Now, we have n-1 = 2^k * q, where q is odd and k > 0
     # print(f"With n = {n}, n-1 = 2^{k} * {q}") #!--- For testing
 
-    # Run n_rounds rounds of testing (false positive rate = 1/4^n_rounds)
-    for _ in range(n_rounds):
-        # Select a random base `a` in the range [2, n-2] (1 < a < n-1)
-        a: int = random.randint(2, n - 2)
+    def _miller_rabin_single_round(a: int) -> bool:
+        """
+        Perform a single round of the Miller-Rabin test with base `a`.
+
+        Args:
+            a (int): The base to test against.
+
+        Returns:
+            bool: True if n passes this round, False if it fails.
+        """
         # Compute x = a^q mod n
         x: int = pow(a, q, n)
         
-        # 1st condition: if a^(n-1) mod n = 1 or n-1, this round passes
+        # 1st check: if a^q mod n = 1 or n-1, this round passes
         #? According to https://www.geeksforgeeks.org/primality-test-set-3-miller-rabin/, it also checks if x == n-1
-        if x == 1 or x == n-1:
-            continue # This round passes (i.e., n is probably prime), continue to next round
+        if x == 1 or x == n - 1:
+            return True # This round passes (i.e., n is probably prime)
         
-        # 2nd condition: if 1st condition is not met, check if x can be squared k times to reach n-1
+        # 2nd check: if 1st check is not met, check if x can be squared k times to reach n-1
         # Loop for j in [0, k-1] (k times), check if (a^q)^(2^j) mod n = x^(2^j) mod n = n-1. If we find such j, n is probably prime
-        for _ in range(k-1):
-            x: int = pow(x, 2, n) # Keep squaring x (~ x^(2^j) mod n)
+        for _ in range(k - 1):
+            x = pow(x, 2, n)
             if x == n - 1:
-                break # This round passes (i.e., n is probably prime), break out of this loop and continue to next round
+                return True # This round passes (i.e., n is probably prime)
+            
+        # If both checks are not met, n is composite (i.e., guaranteed not prime)
+        return False
+
+    # Run n_rounds rounds of Miller-Rabin test (false positive rate = 1/4^n_rounds)
+    for _ in range(n_rounds):
+        # Select a random base `a` in the range [2, n-2] (1 < a < n-1)
+        a = secrets.randbelow(n - 3) + 2
+        # randbelow(n - 3) produces an integer in [0, p - 4], adding 2 shifts it to [2, p - 2].
+        # used secrets.randbelow() for better security (cryptographic randomness), instead of a: int = random.randint(2, n - 2)
+        #? random.randint vs secrets.randbelow: https://www.reddit.com/r/learnpython/comments/7w8w6y/what_is_the_different_between_the_random_module/
         
-        # If the loop did not break, i.e., we did not find any j such that x^(2^j) mod n = n-1
-        # return n is composite (i.e., guaranteed not prime)
-        else:
+        if not _miller_rabin_single_round(a):
             return False
         
     # If passed all rounds, n has high probability of being prime (more rounds = lower false positive rate)
@@ -110,5 +126,7 @@ def generate_large_prime(bits, n_rounds=20) -> int:
 
 if __name__ == "__main__":
     bits: int = 2048
+    start_time = time.time()
     prime: int = generate_large_prime(bits)
     print(f"Generated {bits}-bit prime:\n{prime}")
+    print("--- %s seconds ---" % (time.time() - start_time))
