@@ -8,9 +8,8 @@ Notes:
 """
 import random
 import secrets
-import time
 
-def miller_rabin_is_probable_prime(n, n_rounds=20) -> bool:
+def miller_rabin_is_probable_prime(n: int, n_rounds: int = 20) -> bool:
     """
     Perform the Miller-Rabin primality test on n to determine if it is a (probable) prime.
     
@@ -76,7 +75,7 @@ def miller_rabin_is_probable_prime(n, n_rounds=20) -> bool:
     # Run n_rounds rounds of Miller-Rabin test (false positive rate = 1/4^n_rounds)
     for _ in range(n_rounds):
         # Select a random base `a` in the range [2, n-2] (1 < a < n-1)
-        a = secrets.randbelow(n - 3) + 2
+        a: int = secrets.randbelow(n - 3) + 2
         # randbelow(n - 3) produces an integer in [0, p - 4], adding 2 shifts it to [2, p - 2].
         # used secrets.randbelow() for better security (cryptographic randomness), instead of a: int = random.randint(2, n - 2)
         #? random.randint vs secrets.randbelow: https://www.reddit.com/r/learnpython/comments/7w8w6y/what_is_the_different_between_the_random_module/
@@ -87,7 +86,7 @@ def miller_rabin_is_probable_prime(n, n_rounds=20) -> bool:
     # If passed all rounds, n has high probability of being prime (more rounds = lower false positive rate)
     return True
 
-def get_random_odd_number(bits) -> int:
+def get_random_odd_number(bits: int) -> int:
     """
     Generate a random odd number with the given number of bits.
         1. Top bit is set -> number is of full length (i.e., it has the specified number of bits)
@@ -99,11 +98,17 @@ def get_random_odd_number(bits) -> int:
     Returns:
         int: Random odd integer of the specified bit length.
     """
-    n: int = random.getrandbits(bits)
-    n |= (1 << (bits - 1)) | 1 # Ensure top and bottom bits set: full length, odd
+    n: int = random.getrandbits(bits) # Generate a random number with the specified number of bits, in range [0, 2^bits - 1], inclusive.
+    # Perform bitwise OR with masks to set top and bottom bits:
+    n |= (
+        (1 << (bits - 1)) # Set top bit: full length (mask 100...0)
+        | 1  # Set bottom bit: odd (mask 000...1)
+    )
+    
+    print(f"Generated random odd number of length: {n.bit_length()}")  #!--- For testing
     return n
 
-def generate_large_prime(bits, n_rounds=20) -> int:
+def generate_large_prime(bits: int, n_rounds: int = 20) -> int:
     """
     Generate a large prime number with the given number of bits.
 
@@ -125,8 +130,11 @@ def generate_large_prime(bits, n_rounds=20) -> int:
 
 
 if __name__ == "__main__":
+    import time
+    
     bits: int = 2048
-    start_time = time.time()
+    
+    start_time: float = time.time()
     prime: int = generate_large_prime(bits)
     print(f"Generated {bits}-bit prime:\n{prime}")
     print("--- %s seconds ---" % (time.time() - start_time))

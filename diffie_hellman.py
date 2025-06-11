@@ -6,7 +6,6 @@ Date: 19-May-2025
 Notes:
     - 
 """
-
 import secrets
 
 def generate_dh_private(p) -> int:
@@ -21,6 +20,7 @@ def generate_dh_private(p) -> int:
     """
     return secrets.randbelow(p - 3) + 2 
     # randbelow(p - 3) produces an integer in [0, p - 4], adding 2 shifts it to [2, p - 2].
+    # used secrets.randbelow() for better security (cryptographic randomness) than random.randint
     #? random.randint vs secrets.randbelow: https://www.reddit.com/r/learnpython/comments/7w8w6y/what_is_the_different_between_the_random_module/
 
 def compute_dh_public(p, g, private) -> int:
@@ -62,12 +62,12 @@ if __name__ == "__main__":
     private_b = 52310969057422642239996398424873765537874701074077817731179068188790798857374
 
     # Compute public keys
-    public_a = compute_dh_public(g, private_a, p)
-    public_b = compute_dh_public(g, private_b, p)
+    public_a = compute_dh_public(p, g, private_a)
+    public_b = compute_dh_public(p, g, private_b)
 
     # Compute shared secrets
-    shared_secret_a = compute_shared_secret(public_b, private_a, p)
-    shared_secret_b = compute_shared_secret(public_a, private_b, p)
+    shared_secret_a = compute_shared_secret(p, public_b, private_a)
+    shared_secret_b = compute_shared_secret(p, public_a, private_b)
 
     print(f"Private A: {private_a}, Public A: {public_a}, Shared Secret A: {shared_secret_a}")
     print(f"Private B: {private_b}, Public B: {public_b}, Shared Secret B: {shared_secret_b}")
