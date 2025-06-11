@@ -20,7 +20,7 @@ where = ["src"]
 name = "diffie-hellman-demo"
 version = "0.1.0"
 description = "A simple Diffie-Hellman key exchange demonstration"
-authors = ["Thomas Dang mdan0038@student.monash.edu"]
+authors = ["Thomas Dang <mdan0038@student.monash.edu>"]
 
 [tool.poetry.dependencies]
 python = ">=3.9"
