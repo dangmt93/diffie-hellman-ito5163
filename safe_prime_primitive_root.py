@@ -9,7 +9,7 @@ Notes:
 import random
 import multiprocessing
 from multiprocessing.synchronize import Event as ProcessEvent
-from miller_rabin import miller_rabin_is_probable_prime, get_random_odd_number
+from miller_rabin import miller_rabin_is_probable_prime
 
 
 def generate_safe_prime_pair(safe_prime_bits: int) -> tuple[int, int]:
@@ -176,6 +176,43 @@ def generate_safe_prime_pair_parallel(safe_prime_bits: int, num_workers: int | N
     return p_val, q_val
 
 
+def find_primitive_root_from_safe_prime(p: int, q: int, smallest_primitive_root: bool = True) -> int:
+    """
+    Find a primitive root modulo a safe prime p of the form 2q + 1.
+    
+    It can either find the smallest primitive root (in sequential order) or any primitive root (chosen randomly) 
+    depending on the parameter `smallest_primitive_root`.
+
+    Args:
+        p (int): A safe prime number.
+        q (int): The corresponding Sophie Germain prime.
+        smallest_primitive_root (bool, optional): Flag to indicate if the smallest
+            primitive root should be found. Defaults to True.
+
+    Returns:
+        int: A primitive root modulo p.
+
+    Raises:
+        ValueError: If no primitive root is found, although this should not happen for safe primes.
+    """
+
+    prime_factors: list[int] = [2, q]  # The only prime factors of p-1 are 2 and q (since p = 2q + 1, so p-1 = 2q)
+    
+    if smallest_primitive_root:
+        # Search sequentially for smallest primitive root modulo p
+        for g in range(2, p-1): # search in [2, p-2] (since g = p-1 or 1 are not primitive roots)
+            #? g is a primitive root mod p if g^((p-1)/r) != 1 (mod p) for each prime divisor r of p-1
+            if all(pow(g, (p-1)//factor, p) != 1 for factor in prime_factors):
+                return g
+    else:
+        # Search randomly for a primitive root modulo p
+        while True:
+            g: int = random.randrange(2, p-1)
+            if all(pow(g, (p-1)//factor, p) != 1 for factor in prime_factors):
+                return g
+    
+    raise ValueError("No primitive root found")  # Shouldn't happen for safe primes
+
 if __name__ == "__main__":
     import time
     
@@ -187,3 +224,6 @@ if __name__ == "__main__":
     print(f"→ Corresponding q (bit-length {q.bit_length()}):\n{q}")
     
     print(f"\nTime taken: {time.time() - time_start} seconds")
+    
+    primitive_root: int = find_primitive_root_from_safe_prime(p, q)
+    print(f"\n→ Found primitive root g (bit-length {primitive_root.bit_length()}):\n{primitive_root}")
