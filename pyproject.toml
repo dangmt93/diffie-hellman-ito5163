@@ -10,8 +10,8 @@ readme = "README.md"
 authors = [
 	{ name = "Thomas Dang", email = "mdan0038@student.monash.edu" }
 ]
-requires-python = ">=3.9"
-dependencies = []
+requires-python = ">3.10"
+dependencies = ["cryptography (>=45.0.4,<46.0.0)"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -23,4 +23,4 @@ description = "A simple Diffie-Hellman key exchange demonstration"
 authors = ["Thomas Dang <mdan0038@student.monash.edu>"]
 
 [tool.poetry.dependencies]
-python = ">=3.9"
+python = ">3.10"
