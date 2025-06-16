@@ -71,7 +71,6 @@ class User:
         self.dh_g: int | None = None
         self.dh_private: int | None = None
         self.dh_public: int | None = None
-        self.dh_shared_secret: int | None = None
         
         # Peer connection states
         self.connected_peers: dict[str, PeerInfo] = {}
@@ -107,7 +106,7 @@ class User:
         threading.Thread(target=handle_msg, daemon=True).start()
 
     def make_message(self, 
-                    dest_hostname: str, msg_type: str, payload: dict[str, Any], attach_signature: bool = True
+                    dest_hostname: str, msg_type: MsgType, payload: dict[str, Any], attach_signature: bool = True
     ) -> dict:
         """
         Create a new JSON message with the given recipient, message type, and payload.
@@ -117,18 +116,17 @@ class User:
         - timestamp: A timestamp in ISO-8601 UTC format for freshness.
         - source: The source of the message, in format "hostname".
         - dest: The intended destination of the message, in format "hostname".
-        - type: The type of the message (e.g. DH_INIT, DH_REPLY, DATA).
+        - type: The type of the message (e.g. DH_INIT, DH_PUBLIC, DATA).
         - payload: The payload of the message, represented as a dictionary in JSON format.
         - signature: The ECDSA signature of the message, signed with the user's ECDSA private key 
                         using the canonical serialisation of the message fields. 
                         (Only included if attach_signature is True.)
 
         Args:
-            recipient_identity (str): The identity of the recipient.
-            recipient_ip (str): The IP address of the recipient.
-            msg_type (str): The type of the message (e.g. DH_PARAMS, DH_PUBLIC, DATA).
-            payload (dict): The payload of the message, represented as a dictionary in JSON format.
-            attach_signature (bool): Whether to attach a signature to the message. Defaults to True.
+            dest_hostname (str): The hostname of the intended recipient of the message.
+            msg_type (MsgType): The type of the message (e.g. DH_INIT, DH_PUBLIC, DATA).
+            payload (dict[str, Any]): The payload of the message, represented as a dictionary in JSON format.
+            attach_signature (bool, optional): Whether to attach the ECDSA signature to the message. Defaults to True.
 
         Returns:
             dict: The constructed message dictionary.
@@ -140,7 +138,7 @@ class User:
             "timestamp" :   timestamp,
             "source"    :   self.hostname,
             "dest"      :   dest_hostname,
-            "type"      :   msg_type,
+            "type"      :   msg_type.value,
             "payload"   :   payload,
         }
         
@@ -171,7 +169,8 @@ class User:
         """
         data: bytes = json.dumps(msg).encode()
         self.sock.sendto(data, (dest_ip, dest_port))
-        print(f"[SENT to {dest_ip}:{dest_port}]\n") 
+        print(f"[SENT to {dest_ip}:{dest_port}]\n")
+        # print(f"{json.dumps(msg, indent=2)}\n") #! For testing
 
     def init_dh(self, prime_bit_len: int = 512) -> None:
         """
@@ -195,7 +194,7 @@ class User:
         
         # Build message
         payload: dict[str, int] = { "p": p, "g": g, "dh_public": self.dh_public }
-        msg: dict[str, str | dict[str, Any]] = self.make_message("_", "DH_INIT", payload) # unknown dest hostname for now
+        msg: dict[str, str | dict[str, Any]] = self.make_message(dest_ip, MsgType.DH_INIT, payload) # Use IP as temporary dest hostname
         
         # Send message
         self.send_json(dest_ip, port, msg)
@@ -225,12 +224,12 @@ class User:
             print("[ERROR] Invalid choice.")
             return
         
-        # Send data
+        # Send data with payload {iv, ciphertext} (without signature)
         plaintext: bytes = input('Plaintext: ').encode()
         iv: bytes = secrets.token_bytes(12)
         ciphertext: bytes = AESGCM(peer.key).encrypt(iv, plaintext, None)
         payload: dict[str, str] = {'iv': iv.hex(), 'ciphertext': ciphertext.hex()}
-        msg: dict[str, str | dict[str, Any]] = self.make_message(peer.hostname, 'DATA', payload)
+        msg: dict[str, str | dict[str, Any]] = self.make_message(peer.hostname, MsgType.DATA, payload, attach_signature=False)
         self.send_json(peer.ip, peer.port, msg)
         
     def remove_peer(self) -> None:
@@ -341,7 +340,7 @@ class User:
 
         # Build response message
         res_payload: dict[str, int] = { "dh_public": self.dh_public }
-        res_msg: dict[str, str | dict[str, Any]] = self.make_message(peer_hostname, "DH_PUBLIC", res_payload)
+        res_msg: dict[str, str | dict[str, Any]] = self.make_message(peer_hostname, MsgType.DH_PUBLIC, res_payload)
 
         # Send response message, back to source address
         self.send_json(source_addr[0], source_addr[1], res_msg)
@@ -351,16 +350,18 @@ class User:
         if self.dh_p is None or self.dh_private is None:
             print("[ERROR] DH parameters not set.")
             return
-        self.dh_shared_secret = compute_shared_secret(self.dh_p, peer_dh_pub, self.dh_private)
-        self.dh_symmetric_key = derive_symmetric_key(self.dh_shared_secret)
-        print(f"[INFO] Set DH shared secret: {self.dh_shared_secret}")
-        print(f"[INFO] Set DH symmetric key: {self.dh_symmetric_key}")
+        dh_shared_secret = compute_shared_secret(self.dh_p, peer_dh_pub, self.dh_private)
+        dh_symmetric_key = derive_symmetric_key(dh_shared_secret)
+        print(f"[INFO] Set DH shared secret: {dh_shared_secret}")
+        print(f"[INFO] Set DH symmetric key: {dh_symmetric_key}")
         
         # Store connected peer's address
-        peer_info: PeerInfo = PeerInfo(peer_hostname, source_addr[0], source_addr[1], self.dh_symmetric_key)
+        peer_info: PeerInfo = PeerInfo(peer_hostname, source_addr[0], source_addr[1], dh_symmetric_key)
         self.connected_peers[peer_info.hostname + "@" + peer_info.ip] = peer_info
         print(f"[INFO] Set connected peer info: {peer_hostname}@{source_addr[0]}:{source_addr[1]}\n")
 
+        # Reset DH parameters
+        self.dh_p = self.dh_g = self.dh_private = self.dh_public = None
 
     def handle_dh_public(self, msg: dict[str, str | dict[str, Any]], source_addr: tuple[str, int]) -> None:
         """
@@ -400,15 +401,18 @@ class User:
         if self.dh_p is None or self.dh_private is None:
             print("[ERROR] DH parameters not set.")
             return
-        self.dh_shared_secret = compute_shared_secret(self.dh_p, peer_dh_pub, self.dh_private)
-        self.dh_symmetric_key = derive_symmetric_key(self.dh_shared_secret)
-        print(f"[INFO] Set DH shared secret: {self.dh_shared_secret}")
-        print(f"[INFO] Set DH symmetric key: {self.dh_symmetric_key}")
+        dh_shared_secret = compute_shared_secret(self.dh_p, peer_dh_pub, self.dh_private)
+        dh_symmetric_key = derive_symmetric_key(dh_shared_secret)
+        print(f"[INFO] Set DH shared secret: {dh_shared_secret}")
+        print(f"[INFO] Set DH symmetric key: {dh_symmetric_key}")
         
         # Store connected peer's address
-        peer_info: PeerInfo = PeerInfo(peer_hostname, source_addr[0], source_addr[1], self.dh_symmetric_key)
+        peer_info: PeerInfo = PeerInfo(peer_hostname, source_addr[0], source_addr[1], dh_symmetric_key)
         self.connected_peers[peer_info.hostname + "@" + peer_info.ip] = peer_info
         print(f"[INFO] Set connected peer info: {peer_hostname}@{source_addr[0]}:{source_addr[1]}\n")
+        
+        # Reset DH parameters
+        self.dh_p = self.dh_g = self.dh_private = self.dh_public = None
         
 
     def handle_encrypted_data(self, msg: dict[str, str | dict[str, Any]], source_addr: tuple[str, int]) -> None:
@@ -457,7 +461,7 @@ class User:
                     print("[INFO] Exiting.")
                     break
                 case _:
-                    print("Unknown command. Use initdh / senddata / enddh / exit.")
+                    print("Unknown command. Use 'init dh', 'send data', 'remove peer', or 'exit'.")
                     
 
     # ============================================================================ #

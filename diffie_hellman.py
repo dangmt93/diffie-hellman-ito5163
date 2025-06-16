@@ -81,11 +81,14 @@ def derive_symmetric_key(shared_secret: int,
     secret_bytes_ceil: int = math.ceil(shared_secret.bit_length() / 8)
     secret_bytes = shared_secret.to_bytes(length=secret_bytes_ceil, byteorder='big')
     
-    # Set up HKDF-SHA256
-    hkdf: HKDF = HKDF(algorithm=hashes.SHA256(), length=length, salt=salt, info=info)
-    # Derive and return symmetric key
-    return hkdf.derive(secret_bytes)
-
+    try:
+        # Set up HKDF-SHA256
+        hkdf: HKDF = HKDF(algorithm=hashes.SHA256(), length=length, salt=salt, info=info)
+        # Derive and return symmetric key
+        return hkdf.derive(secret_bytes)
+    except Exception as e:
+        print(f"Failed to derive symmetric key: {e}")
+        return b""
 
 if __name__ == "__main__":
     # Example parameters
