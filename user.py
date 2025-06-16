@@ -1,4 +1,4 @@
-import socket, threading, json, uuid, secrets, hashlib, sys
+import socket, threading, json, uuid
 from enum import Enum
 from typing import Any
 from datetime import datetime, timezone
@@ -11,7 +11,7 @@ from signature_utils import (
     load_ecdsa_public_key,
 )
 
-from diffie_hellman import generate_dh_private, compute_dh_public, compute_shared_secret
+from diffie_hellman import generate_dh_private, compute_dh_public, compute_shared_secret, derive_symmetric_key
 from safe_prime_primitive_root import generate_safe_prime_pair_parallel, find_primitive_root_from_safe_prime
 
 
@@ -33,7 +33,7 @@ class User:
         
         This constructor:
         - sets up the user's hostname, ip, public ECDSA key store path, and loads the private ECDSA key
-        - prepares Diffie-Hellman state variables
+        - prepares Diffie-Hellman and peer state variables
         - sets up a UDP socket for network communication
         - starts a listener thread to handle incoming messages
         
@@ -60,7 +60,10 @@ class User:
         self.dh_private: int | None = None
         self.dh_public: int | None = None
         self.dh_shared_secret: int | None = None
+        
+        # Peer connection states
         self.derived_key: bytes | None = None
+        self.peer_addr: tuple[str, int] | None = None
         
         # Networking
         self.sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -83,8 +86,8 @@ class User:
                 data, addr = self.sock.recvfrom(8192)
                 try:
                     msg: dict = json.loads(data.decode())
-                    print(f"\n[RECV from {addr}]: {json.dumps(msg, indent=2)}")
-                    self.handle_json_message(msg)
+                    print(f"\n[RECV from {addr}]: {json.dumps(msg, indent=2)}\n")
+                    self.handle_json_message(msg, addr)
                 except Exception as e:
                     print(f"[WARN] Failed to parse/handle message: {e}")
 
@@ -93,8 +96,7 @@ class User:
         threading.Thread(target=handle_msg, daemon=True).start()
 
     def make_message(self, 
-                    dest_hostname: str, dest_ip: str, 
-                    msg_type: str, payload: dict[str, Any], attach_signature: bool = True
+                    dest_hostname: str, msg_type: str, payload: dict[str, Any], attach_signature: bool = True
     ) -> dict:
         """
         Create a new JSON message with the given recipient, message type, and payload.
@@ -102,8 +104,8 @@ class User:
         The message is structured as a dictionary containing the following fields:
         - message_id: A unique UUID for replay protection.
         - timestamp: A timestamp in ISO-8601 UTC format for freshness.
-        - source: The source of the message, in format "username@ip".
-        - dest: The intended destination of the message, in format "name@ip".
+        - source: The source of the message, in format "hostname".
+        - dest: The intended destination of the message, in format "hostname".
         - type: The type of the message (e.g. DH_INIT, DH_REPLY, DATA).
         - payload: The payload of the message, represented as a dictionary in JSON format.
         - signature: The ECDSA signature of the message, signed with the user's ECDSA private key 
@@ -125,8 +127,8 @@ class User:
         msg: dict[str, str | dict[str, Any]] = {
             "message_id":   msg_id,
             "timestamp" :   timestamp,
-            "source"    :   f"{self.hostname}@{self.ip}",
-            "dest"      :   f"{dest_hostname}@{dest_ip}",
+            "source"    :   self.hostname,
+            "dest"      :   dest_hostname,
             "type"      :   msg_type,
             "payload"   :   payload,
         }
@@ -182,13 +184,13 @@ class User:
         
         # Build message
         payload: dict[str, int] = { "p": p, "g": g, "A": self.dh_public }
-        msg: dict[str, str | dict[str, Any]] = self.make_message("_", dest_ip, "DH_INIT", payload)
+        msg: dict[str, str | dict[str, Any]] = self.make_message("_", "DH_INIT", payload) # unknown dest hostname for now
         
         # Send message
         self.send_json(dest_ip, port, msg)
         
 
-    def handle_json_message(self, msg: dict[str, str | dict[str, Any]]) -> None:
+    def handle_json_message(self, msg: dict[str, str | dict[str, Any]], addr: tuple[str, int]) -> None:
         """
         Handle a received JSON message from a peer.
 
@@ -196,7 +198,7 @@ class User:
 
         Args:
             msg (dict): The received message, represented as a dictionary in JSON format.
-            addr (tuple): The address of the sender (host, port).
+            addr (tuple): The address of the source (host, port).
 
         Returns:
             None
@@ -207,65 +209,80 @@ class User:
             return
         
         if msg_type == MsgType.DH_INIT.value:
-            self.handle_dh_init(msg)
+            self.handle_dh_init(msg, addr)
         elif msg_type == MsgType.DH_PUBLIC.value:
-            self.handle_dh_public(msg)
+            self.handle_dh_public(msg, addr)
         elif msg_type == MsgType.DATA.value:
             self.handle_data(msg)
         else:
             print(f"[WARN] Unknown message type: {msg_type}")
             
-        print(f"[INFO] Handled message of type {msg_type} from {msg['source']} to {msg['dest']}") #! For testing
+        # print(f"[INFO] Handled message of type {msg_type} from {msg['source']} to {msg['dest']}") #! For testing
 
-    def handle_dh_init(self, msg: dict) -> None:
+    def handle_dh_init(self, msg: dict[str, str | dict[str, Any]], source_addr: tuple[str, int]) -> None:
         """
-        1. Verify signature on (p,g, A)
-        2. Store p,g
-        3. Generate b, B
-        4. Sign and send DH_PUBLIC
+        Handle an incoming DH_INIT message to establish Diffie-Hellman parameters.
+
+        Upon receiving a DH_INIT message, this function: 
+        - retrieves the peer's ECDSA public key (using the peer's hostname) and verifies the message signature on (p,g,A)
+        - stores DH parameters
+        - generates the user's own ephemeral DH parameters (b,B)
+        - constructs and sends a DH_PUBLIC response message back with the user's DH public (B) to the source address
+        - computes DH shared secret (K) and derives/stores the symmetric secret key
+
+        Args:
+            msg (dict): The received message containing the DH_INIT parameters.
+            source_addr (tuple): The address (IP, port) from which the message was received.
+
+        Returns:
+            None
         """
         # Retrieve peer's ECDSA public key
-        peer_name, _ = msg["source"].split("@")
-        peer_public_key_path: str = f"{self.public_key_store_path}/{peer_name.lower()}_pub.pem"
+        peer_hostname = str(msg["source"])
+        peer_public_key_path: str = f"{self.public_key_store_path}/{peer_hostname.lower()}_pub.pem"
         peer_pub_ecdsa_pub: ec.EllipticCurvePublicKey = load_ecdsa_public_key(peer_public_key_path)
         
         # Verify received signature
         canonical_json: bytes = self.canonical_json_for_signing(msg)
-        if not verify_signature(peer_pub_ecdsa_pub, canonical_json, bytes.fromhex(msg["signature"])):
+        if not isinstance(signature := msg.get("signature"), str):
+            print("[ERROR] Signature missing or not a string.")
+            return
+        if not verify_signature(peer_pub_ecdsa_pub, canonical_json, bytes.fromhex(signature)):
             print("[ERROR] DH_INIT signature invalid—possible MITM")
             return
-        
-        
-        
-        
-        pass
-        # sender    = msg["sender"]
-        # recipient = msg["recipient"]
-        # payload   = msg["payload"]
-        # # Rebuild sign input
-        # sign_input = (
-        #     f"{msg['message_id']}|{msg['timestamp']}|{sender}|"
-        #     f"{recipient}|DH_PARAMS|{json.dumps(payload, sort_keys=True)}"
-        # ).encode()
-        # if not verify_signature(self.peer_ecdsa_pub, sign_input, bytes.fromhex(msg["signature"])):
-        #     print("[ERROR] DH_PARAMS signature invalid—possible MITM")
-        #     return
 
-        # # Accept parameters
-        # self.dh_p = int(payload["p"])
-        # self.dh_g = int(payload["g"])
-        # print(f"[INFO] Received DH params p={self.dh_p}, g={self.dh_g}")
+        # Accept parameters
+        if not isinstance(payload := msg.get("payload"), dict):
+            print("[ERROR] Payload is not a dictionary.")
+            return
+        self.dh_p = int(payload["p"])
+        self.dh_g = int(payload["g"])
+        print(f"[INFO] Set DH params p={self.dh_p}, g={self.dh_g}")
 
-        # # Generate ephemeral DH keypair
-        # self.dh_private = generate_dh_private(self.dh_p)
-        # self.dh_public  = compute_dh_public(self.dh_p, self.dh_g, self.dh_private)
+        # Generate own ephemeral DH parameters
+        self.dh_private = generate_dh_private(self.dh_p)
+        self.dh_public  = compute_dh_public(self.dh_p, self.dh_g, self.dh_private)
 
-        # # Send our public
-        # payload = { "dh_public": str(self.dh_public) }
-        # response = self.make_message(sender, "DH_PUBLIC", payload)
-        # self.send_json(addr[0], addr[1], response)
+        # Build response message
+        res_payload: dict[str, int] = { "B": self.dh_public }
+        res_msg: dict[str, str | dict[str, Any]] = self.make_message(peer_hostname, "DH_PUBLIC", res_payload)
 
-    def handle_dh_public(self, msg: dict) -> None:
+        # Send response message, back to source address
+        self.send_json(source_addr[0], source_addr[1], res_msg)
+        
+        # Compute shared secret and derive symmetric key
+        peer_dh_pub = int(payload["A"])
+        self.dh_shared_secret = compute_shared_secret(self.dh_p, peer_dh_pub, self.dh_private)
+        self.dh_symmetric_key = derive_symmetric_key(self.dh_shared_secret)
+        print(f"[INFO] Set DH shared secret: {self.dh_shared_secret}")
+        print(f"[INFO] Set DH symmetric key: {self.dh_symmetric_key}")
+        
+        # Store connected peer's address
+        self.peer_addr = source_addr
+        print(f"[INFO] Set peer address: {self.peer_addr}\n")
+
+
+    def handle_dh_public(self, msg: dict[str, str | dict[str, Any]], source_addr: tuple[str, int]) -> None:
         """
         1. Verify signature on B (or A)
         2. Compute shared secret and derive symmetric key
