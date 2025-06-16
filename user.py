@@ -1,7 +1,9 @@
 import socket, threading, json, uuid
 from enum import Enum
+from dataclasses import dataclass
 from typing import Any
 from datetime import datetime, timezone
+import secrets
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric import ec
 from signature_utils import (
@@ -14,6 +16,16 @@ from signature_utils import (
 from diffie_hellman import generate_dh_private, compute_dh_public, compute_shared_secret, derive_symmetric_key
 from safe_prime_primitive_root import generate_safe_prime_pair_parallel, find_primitive_root_from_safe_prime
 
+@dataclass
+class PeerInfo:
+    """ 
+    Dataclass to store information about a connected peer, after successful DH key exchange. 
+    A peer has a hostname, IP address, port, and a derived symmetric key.
+    """
+    hostname: str       # e.g. "Bob"
+    ip:       str       # e.g. "192.168.1.2"
+    port:     int       # e.g. 5002
+    key:      bytes     # the derived symmetric key
 
 class MsgType(Enum):
     DH_INIT   = "DH_INIT"
@@ -62,8 +74,7 @@ class User:
         self.dh_shared_secret: int | None = None
         
         # Peer connection states
-        self.derived_key: bytes | None = None
-        self.peer_addr: tuple[str, int] | None = None
+        self.connected_peers: dict[str, PeerInfo] = {}
         
         # Networking
         self.sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -83,11 +94,11 @@ class User:
         """
         def handle_msg() -> None:
             while True:
-                data, addr = self.sock.recvfrom(8192)
+                data, source_addr = self.sock.recvfrom(8192)
                 try:
                     msg: dict = json.loads(data.decode())
-                    print(f"\n[RECV from {addr}]: {json.dumps(msg, indent=2)}\n")
-                    self.handle_json_message(msg, addr)
+                    print(f"\n[RECV from {source_addr}]: {json.dumps(msg, indent=2)}\n")
+                    self.handle_json_message(msg, source_addr)
                 except Exception as e:
                     print(f"[WARN] Failed to parse/handle message: {e}")
 
@@ -183,22 +194,86 @@ class User:
         self.dh_public  = compute_dh_public(p, g, self.dh_private)
         
         # Build message
-        payload: dict[str, int] = { "p": p, "g": g, "A": self.dh_public }
+        payload: dict[str, int] = { "p": p, "g": g, "dh_public": self.dh_public }
         msg: dict[str, str | dict[str, Any]] = self.make_message("_", "DH_INIT", payload) # unknown dest hostname for now
         
         # Send message
         self.send_json(dest_ip, port, msg)
         
+    def send_encrypted_data(self) -> None:
+        """
+        Send encrypted data to a connected peer.
 
-    def handle_json_message(self, msg: dict[str, str | dict[str, Any]], addr: tuple[str, int]) -> None:
+        Prompt the user to select a connected peer to send data to, and then ask for plaintext input.
+        The plaintext is encrypted using AES-GCM with the shared symmetric key between the user and the peer.
+        The IV and ciphertext are sent to the peer as a JSON message with type 'DATA'.
+        """
+        
+        if not self.connected_peers:
+            print("[ERROR] No connected peers. Please run `init dh` to connect to a peer first.")
+            return
+        
+        # Peer selection
+        print("Select a peer to send data to:")
+        peer_list: list[PeerInfo] = list(self.connected_peers.values())
+        for i, peer in enumerate(peer_list, start=1):
+            print(f"{i}: {peer.hostname} ({peer.ip}:{peer.port})")
+        try:
+            choice: int = int(input("Enter the number of the peer: ")) - 1
+            peer: PeerInfo = peer_list[choice]
+        except (IndexError, ValueError):
+            print("[ERROR] Invalid choice.")
+            return
+        
+        # Send data
+        plaintext: bytes = input('Plaintext: ').encode()
+        iv: bytes = secrets.token_bytes(12)
+        ciphertext: bytes = AESGCM(peer.key).encrypt(iv, plaintext, None)
+        payload: dict[str, str] = {'iv': iv.hex(), 'ciphertext': ciphertext.hex()}
+        msg: dict[str, str | dict[str, Any]] = self.make_message(peer.hostname, 'DATA', payload)
+        self.send_json(peer.ip, peer.port, msg)
+        
+    def remove_peer(self) -> None:
+        """
+        Remove a peer from the list of connected peers.
+
+        Prompt the user to select one of the connected peers to remove.
+        Note: this (currently) does not send any message to the peer; it simply removes the peer from the local list of connected peers. 
+        """
+        if not self.connected_peers:
+            print("[ERROR] No connected peers. Please run `init dh` to connect to a peer first.")
+            return
+        
+        # Peer selection
+        print("Select a peer to end connection with:")
+        peer_list: list[PeerInfo] = list(self.connected_peers.values())
+        for i, peer in enumerate(peer_list, start=1):
+            print(f"{i}: {peer.hostname} ({peer.ip}:{peer.port})")
+        try:
+            choice: int = int(input("Enter the number of the peer: ")) - 1
+            peer: PeerInfo = peer_list[choice]
+        except (IndexError, ValueError):
+            print("[ERROR] Invalid choice.")
+            return
+        
+        # TODO: Consider sending a DISCONNECT message to politely notify the peer
+        
+        # (Locally) Remove peer from list of connected peers
+        try:
+            del self.connected_peers[f"{peer.hostname}@{peer.ip}"]
+        except KeyError:
+            print("[ERROR] Peer not found in list of connected peers.")
+        print(f"[DISCONNECTED from {peer.ip}:{peer.port}]\n")
+
+    def handle_json_message(self, msg: dict[str, str | dict[str, Any]], source_addr: tuple[str, int]) -> None:
         """
         Handle a received JSON message from a peer.
 
         Depending on the message type, this calls the appropriate handler function.
 
         Args:
-            msg (dict): The received message, represented as a dictionary in JSON format.
-            addr (tuple): The address of the source (host, port).
+            msg (dict[str, str | dict[str, Any]): The received message, represented as a dictionary in JSON format.
+            source_addr (tuple): The address of the source (host, port).
 
         Returns:
             None
@@ -209,11 +284,11 @@ class User:
             return
         
         if msg_type == MsgType.DH_INIT.value:
-            self.handle_dh_init(msg, addr)
+            self.handle_dh_init(msg, source_addr)
         elif msg_type == MsgType.DH_PUBLIC.value:
-            self.handle_dh_public(msg, addr)
+            self.handle_dh_public(msg, source_addr)
         elif msg_type == MsgType.DATA.value:
-            self.handle_data(msg)
+            self.handle_encrypted_data(msg, source_addr)
         else:
             print(f"[WARN] Unknown message type: {msg_type}")
             
@@ -221,7 +296,7 @@ class User:
 
     def handle_dh_init(self, msg: dict[str, str | dict[str, Any]], source_addr: tuple[str, int]) -> None:
         """
-        Handle an incoming DH_INIT message to establish Diffie-Hellman parameters.
+        Handle a received DH_INIT message to establish Diffie-Hellman parameters.
 
         Upon receiving a DH_INIT message, this function: 
         - retrieves the peer's ECDSA public key (using the peer's hostname) and verifies the message signature on (p,g,A)
@@ -229,16 +304,17 @@ class User:
         - generates the user's own ephemeral DH parameters (b,B)
         - constructs and sends a DH_PUBLIC response message back with the user's DH public (B) to the source address
         - computes DH shared secret (K) and derives/stores the symmetric secret key
+        - stores connected peer's address
 
         Args:
-            msg (dict): The received message containing the DH_INIT parameters.
-            source_addr (tuple): The address (IP, port) from which the message was received.
+            msg (dict[str, str | dict[str, Any]): The received message containing the DH_INIT parameters.
+            source_addr (tuple): The address (IP, port) from which the message was sent.
 
         Returns:
             None
         """
         # Retrieve peer's ECDSA public key
-        peer_hostname = str(msg["source"])
+        peer_hostname: str = str(msg["source"])
         peer_public_key_path: str = f"{self.public_key_store_path}/{peer_hostname.lower()}_pub.pem"
         peer_pub_ecdsa_pub: ec.EllipticCurvePublicKey = load_ecdsa_public_key(peer_public_key_path)
         
@@ -252,11 +328,11 @@ class User:
             return
 
         # Accept parameters
-        if not isinstance(payload := msg.get("payload"), dict):
+        if not isinstance(received_payload := msg.get("payload"), dict):
             print("[ERROR] Payload is not a dictionary.")
             return
-        self.dh_p = int(payload["p"])
-        self.dh_g = int(payload["g"])
+        self.dh_p = int(received_payload["p"])
+        self.dh_g = int(received_payload["g"])
         print(f"[INFO] Set DH params p={self.dh_p}, g={self.dh_g}")
 
         # Generate own ephemeral DH parameters
@@ -264,104 +340,119 @@ class User:
         self.dh_public  = compute_dh_public(self.dh_p, self.dh_g, self.dh_private)
 
         # Build response message
-        res_payload: dict[str, int] = { "B": self.dh_public }
+        res_payload: dict[str, int] = { "dh_public": self.dh_public }
         res_msg: dict[str, str | dict[str, Any]] = self.make_message(peer_hostname, "DH_PUBLIC", res_payload)
 
         # Send response message, back to source address
         self.send_json(source_addr[0], source_addr[1], res_msg)
         
         # Compute shared secret and derive symmetric key
-        peer_dh_pub = int(payload["A"])
+        peer_dh_pub: int = int(received_payload["dh_public"])
+        if self.dh_p is None or self.dh_private is None:
+            print("[ERROR] DH parameters not set.")
+            return
         self.dh_shared_secret = compute_shared_secret(self.dh_p, peer_dh_pub, self.dh_private)
         self.dh_symmetric_key = derive_symmetric_key(self.dh_shared_secret)
         print(f"[INFO] Set DH shared secret: {self.dh_shared_secret}")
         print(f"[INFO] Set DH symmetric key: {self.dh_symmetric_key}")
         
         # Store connected peer's address
-        self.peer_addr = source_addr
-        print(f"[INFO] Set peer address: {self.peer_addr}\n")
+        peer_info: PeerInfo = PeerInfo(peer_hostname, source_addr[0], source_addr[1], self.dh_symmetric_key)
+        self.connected_peers[peer_info.hostname + "@" + peer_info.ip] = peer_info
+        print(f"[INFO] Set connected peer info: {peer_hostname}@{source_addr[0]}:{source_addr[1]}\n")
 
 
     def handle_dh_public(self, msg: dict[str, str | dict[str, Any]], source_addr: tuple[str, int]) -> None:
         """
-        1. Verify signature on B (or A)
-        2. Compute shared secret and derive symmetric key
+        Handle a received DH_PUBLIC message from a peer.
+
+        Upon receiving a DH_PUBLIC message, this function:
+        - retrieves the peer's ECDSA public key (using the peer's hostname) and verifies the message signature on (B)
+        - computes DH shared secret (K) and derives/stores the symmetric secret key
+        - stores connected peer's address
+
+        Args:
+            msg (dict[str, str | dict[str, Any]): The received message, represented as a dictionary in JSON format.
+            source_addr (tuple): The address of the source (host, port).
+
+        Returns:
+            None
         """
-        pass
-        # sender    = msg["sender"]
-        # recipient = msg["recipient"]
-        # payload   = msg["payload"]
-        # sign_input = (
-        #     f"{msg['message_id']}|{msg['timestamp']}|{sender}|"
-        #     f"{recipient}|DH_PUBLIC|{json.dumps(payload, sort_keys=True)}"
-        # ).encode()
-        # if not verify_signature(self.peer_ecdsa_pub, sign_input, bytes.fromhex(msg["signature"])):
-        #     print("[ERROR] DH_PUBLIC signature invalid—possible MITM")
-        #     return
-
-        # peer_pub = int(payload["dh_public"])
-        # print(f"[INFO] Received peer DH public: {peer_pub}")
-
-        # # Compute shared secret
-        # self.dh_shared_secret = compute_shared_secret(self.dh_p, peer_pub, self.dh_private)
-        # # Derive a 256-bit key via SHA-256
-        # self.derived_key = hashlib.sha256(str(self.dh_shared_secret).encode()).digest()
-        # print(f"[INFO] Shared secret computed and key derived.")
-
-    def send_encrypted_data(self) -> None:
-        if not self.derived_key:
-            print('[ERROR] No shared key—run initdh first')
+        # Retrieve peer's ECDSA public key
+        peer_hostname: str = str(msg["source"])
+        peer_public_key_path: str = f"{self.public_key_store_path}/{peer_hostname.lower()}_pub.pem"
+        peer_pub_ecdsa_pub: ec.EllipticCurvePublicKey = load_ecdsa_public_key(peer_public_key_path)
+        
+        # Verify received signature
+        canonical_json: bytes = self.canonical_json_for_signing(msg)
+        if not isinstance(signature := msg.get("signature"), str):
+            print("[ERROR] Signature missing or not a string.")
             return
-        # host = input('Peer host: ').strip(); port = int(input('Peer port: ').strip())
-        # recipient = input('Recipient identity: ').strip()
-        # pt = input('Plaintext: ').encode()
-        # iv = secrets.token_bytes(12)
-        # ct = AESGCM(self.derived_key).encrypt(iv, pt, None)
-        # payload = {'iv': iv.hex(), 'ciphertext': ct.hex()}
-        # msg = self.make_message(recipient, 'DATA', payload)
-        # self.send_json(host, port, msg)
+        if not verify_signature(peer_pub_ecdsa_pub, canonical_json, bytes.fromhex(signature)):
+            print("[ERROR] DH_PUBLIC signature invalid—possible MITM")
+            return
+        
+        # Compute shared secret and derive symmetric key
+        if not isinstance(received_payload := msg.get("payload"), dict):
+            print("[ERROR] Payload is not a dictionary.")
+            return
+        peer_dh_pub: int = int(received_payload["dh_public"])
+        if self.dh_p is None or self.dh_private is None:
+            print("[ERROR] DH parameters not set.")
+            return
+        self.dh_shared_secret = compute_shared_secret(self.dh_p, peer_dh_pub, self.dh_private)
+        self.dh_symmetric_key = derive_symmetric_key(self.dh_shared_secret)
+        print(f"[INFO] Set DH shared secret: {self.dh_shared_secret}")
+        print(f"[INFO] Set DH symmetric key: {self.dh_symmetric_key}")
+        
+        # Store connected peer's address
+        peer_info: PeerInfo = PeerInfo(peer_hostname, source_addr[0], source_addr[1], self.dh_symmetric_key)
+        self.connected_peers[peer_info.hostname + "@" + peer_info.ip] = peer_info
+        print(f"[INFO] Set connected peer info: {peer_hostname}@{source_addr[0]}:{source_addr[1]}\n")
+        
 
-    def end_dh(self) -> None:
-        self.p = self.g = self.dh_private = self.dh_public = None
-        self.shared_secret = self.derived_key = None
-        print('[INFO] DH state reset.')
-
-    def handle_data(self, msg: dict) -> None:
+    def handle_encrypted_data(self, msg: dict[str, str | dict[str, Any]], source_addr: tuple[str, int]) -> None:
         """
-        1. Verify signature
-        2. Decrypt ciphertext with AES-GCM
+        Handle a received encrypted data message.
+
+        Checks if the peer is connected, then decrypts the message using AES-GCM and prints the plaintext.
+
+        Args:
+            msg (dict[str, str | dict[str, Any]]): The received message containing the encrypted payload.
+            source_addr (tuple[str, int]): The address (IP, port) from which the message was sent.
+
+        Returns:
+            None
         """
-        pass
-        # sender    = msg["sender"]
-        # recipient = msg["recipient"]
-        # payload   = msg["payload"]
-        # sign_input = (
-        #     f"{msg['message_id']}|{msg['timestamp']}|{sender}|"
-        #     f"{recipient}|DATA|{json.dumps(payload, sort_keys=True)}"
-        # ).encode()
-        # if not verify_signature(self.peer_ecdsa_pub, sign_input, bytes.fromhex(msg["signature"])):
-        #     print("[ERROR] DATA signature invalid—possible MITM")
-        #     return
-
-        # iv  = bytes.fromhex(payload["iv"])
-        # ct  = bytes.fromhex(payload["ciphertext"])
-        # aes = AESGCM(self.derived_key)
-        # pt  = aes.decrypt(iv, ct, None)
-        # print(f"[DECRYPTED from {sender}]: {pt.decode()}")
-
+        peer_hostname: str = str(msg["source"])
+        peer_ip: str = source_addr[0]
+        
+        if (peer := self.connected_peers.get(peer_hostname + "@" + peer_ip)) is None:
+            print(f"[ERROR] Peer {peer_hostname}@{peer_ip} not connected. Cannot handle encrypted data.")
+            return
+        
+        # Decrypt ciphertext with AES-GCM
+        if not isinstance(payload := msg.get("payload"), dict):
+            print("[ERROR] Payload is not a dictionary.")
+            return
+        # print(f"[INFO] Received encrypted data: {msg['payload']}") #! For testing
+        iv: bytes = bytes.fromhex(payload['iv'])
+        ciphertext: bytes = bytes.fromhex(payload['ciphertext'])
+        plaintext: bytes = AESGCM(peer.key).decrypt(iv, ciphertext, None)
+        print(f"[DECRYPTED from {peer_hostname}@{peer_ip}]: {plaintext.decode()}\n")
 
 
     def command_loop(self) -> None:
         """Simple CLI to send DH_PARAMS, DATA, or exit."""
         while True:
-            cmd = input("\nCommand (initdh / senddata / enddh / exit): ").strip().lower()
+            cmd = input("\nCommand (init dh / send data / remove peer / exit): ").strip().lower()
             match cmd:
-                case "initdh":
+                case "init dh":
                     self.init_dh()
-                case "senddata":
+                case "send data":
                     self.send_encrypted_data()
-                case "enddh":
-                    self.end_dh()
+                case "remove peer":
+                    self.remove_peer()
                 case "exit":
                     print("[INFO] Exiting.")
                     break
